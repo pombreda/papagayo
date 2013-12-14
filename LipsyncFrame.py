@@ -24,6 +24,7 @@ import string
 import math
 import wx
 import webbrowser
+import copy
 from utilities import *
 # begin wxGlade: dependencies
 from MouthView import MouthView
@@ -39,6 +40,9 @@ audioExtensions = "*.wav;*.mp3;*.aiff;*.aif;*.au;*.snd;*.mov;*.m4a"
 openWildcard = "%s and sound files|*%s;%s" % (appTitle, lipsyncExtension, audioExtensions)
 openAudioWildcard = "Sound files|%s" % (audioExtensions)
 saveWildcard = "%s files (*%s)|*%s" % (appTitle, lipsyncExtension, lipsyncExtension)
+
+undoStack = []
+redoStack = []
 
 class DigitOnlyValidator(wx.PyValidator):
 	def __init__(self, flag=None, pyVar=None):
@@ -92,6 +96,7 @@ class LipsyncFrame(wx.Frame):
 		self.mainFrame_menubar.Append(wxglade_tmp_menu, "&File")
 		wxglade_tmp_menu = wx.Menu()
 		wxglade_tmp_menu.Append(wx.ID_UNDO, "&Undo\tCtrl+Z", "", wx.ITEM_NORMAL)
+		wxglade_tmp_menu.Append(wx.ID_REDO, "&Redo\tCtrl+Y", "", wx.ITEM_NORMAL)
 		wxglade_tmp_menu.Append(wx.ID_CUT, "Cu&t\tCtrl+X", "", wx.ITEM_NORMAL)
 		wxglade_tmp_menu.Append(wx.ID_COPY, "&Copy\tCtrl+C", "", wx.ITEM_NORMAL)
 		wxglade_tmp_menu.Append(wx.ID_PASTE, "&Paste\tCtrl+V", "", wx.ITEM_NORMAL)
@@ -121,8 +126,10 @@ class LipsyncFrame(wx.Frame):
 		self.mainFrame_toolbar.AddLabelTool(ID_ZOOMIN, "Zoom In", (wx.Bitmap(os.path.join(get_main_dir(),"rsrc/zoom_in.png"))), wx.NullBitmap, wx.ITEM_NORMAL, "Zoom In", "Zoom in on the waveform")
 		self.mainFrame_toolbar.AddLabelTool(ID_ZOOMOUT, "Zoom Out", (wx.Bitmap(os.path.join(get_main_dir(),"rsrc/zoom_out.png"))), wx.NullBitmap, wx.ITEM_NORMAL, "Zoom Out", "Zoom out of the waveform")
 		self.mainFrame_toolbar.AddLabelTool(ID_ZOOM1, "Reset Zoom", (wx.Bitmap(os.path.join(get_main_dir(),"rsrc/zoom_1.png"))), wx.NullBitmap, wx.ITEM_NORMAL, "Reset Zoom", "Reset the zoomed view of the waveform")
+		self.mainFrame_toolbar.AddLabelTool(wx.ID_UNDO, "Undo", (wx.ArtProvider.GetBitmap(wx.ART_UNDO)), wx.NullBitmap, wx.ITEM_NORMAL, "Undo", "Undo")
+		self.mainFrame_toolbar.AddLabelTool(wx.ID_REDO, "Redo", (wx.ArtProvider.GetBitmap(wx.ART_REDO)), wx.NullBitmap, wx.ITEM_NORMAL, "Redo", "Redo")
 		# Tool Bar end
-		self.waveformView = WaveformView(self.panel_2, -1)
+		self.waveformView = WaveformView(self, self.panel_2, -1)
 		self.label_2 = wx.StaticText(self.panel_2, -1, "Voice name:")
 		global ID_VOICENAME; ID_VOICENAME = wx.NewId()
 		self.voiceName = wx.TextCtrl(self.panel_2, ID_VOICENAME, "")
@@ -215,6 +222,8 @@ class LipsyncFrame(wx.Frame):
 		wx.EVT_MENU(self, wx.ID_OPEN, self.OnOpen)
 		wx.EVT_MENU(self, wx.ID_SAVE, self.OnSave)
 		wx.EVT_MENU(self, wx.ID_SAVEAS, self.OnSaveAs)
+		wx.EVT_MENU(self, wx.ID_UNDO, self.OnUndo)
+		wx.EVT_MENU(self, wx.ID_REDO, self.OnRedo)
 		wx.EVT_MENU(self, wx.ID_EXIT,  self.OnQuit)
 		wx.EVT_MENU(self, wx.ID_HELP, self.OnHelp)
 		wx.EVT_MENU(self, wx.ID_ABOUT, self.OnAbout)
@@ -356,29 +365,33 @@ class LipsyncFrame(wx.Frame):
 			paths = dlg.GetPaths()
 			self.Open(paths[0])
 		dlg.Destroy()
+		self.ResetUndo()
 	
 	def Open(self, path):
-			self.doc = LipsyncDoc(self.langman, self)
+			self.doc = LipsyncDoc()
 			if path.endswith(lipsyncExtension):
 				# open a lipsync project
-				self.doc.Open(path)
-				while self.doc.sound is None:
+				self.doc.Open(path, self)
+				retry = True
+				while self.doc.sound is None and retry:
 					# if no sound file found, then ask user to specify one
-					dlg = wx.MessageDialog(self, 'Please load correct audio file', appTitle,
-					wx.OK | wx.ICON_WARNING)
-					result = dlg.ShowModal()
+					dlg = wx.MessageDialog(self,
+					'The corresponding audio file could not be loaded:\n"%s"\n\nSelect audio file manually?' % self.doc.soundPath,
+					'No audio', wx.YES_NO | wx.YES_DEFAULT | wx.ICON_WARNING)
+					retry = dlg.ShowModal() == wx.ID_YES
 					dlg.Destroy()
-					dlg = wx.FileDialog(
-						self, message = "Open Audio", defaultDir = self.config.Read("WorkingDir", get_main_dir()),
-						defaultFile = "", wildcard = openAudioWildcard, style = wx.OPEN | wx.CHANGE_DIR | wx.FILE_MUST_EXIST)
-					if dlg.ShowModal() == wx.ID_OK:
-						self.config.Write("WorkingDir", dlg.GetDirectory())
-						paths = dlg.GetPaths()
-						self.doc.OpenAudio(paths[0])
-					dlg.Destroy()
+					if retry:
+						dlg = wx.FileDialog(
+							self, message = "Open Audio", defaultDir = self.config.Read("WorkingDir", get_main_dir()),
+							defaultFile = "", wildcard = openAudioWildcard, style = wx.OPEN | wx.CHANGE_DIR | wx.FILE_MUST_EXIST)
+						if dlg.ShowModal() == wx.ID_OK:
+							self.config.Write("WorkingDir", dlg.GetDirectory())
+							paths = dlg.GetPaths()
+							self.doc.OpenAudio(paths[0], self)
+						dlg.Destroy()
 			else:
 				# open an audio file
-				self.doc.OpenAudio(path)
+				self.doc.OpenAudio(path, self)
 				if self.doc.sound is None:
 					self.doc = None
 				else:
@@ -482,7 +495,8 @@ class LipsyncFrame(wx.Frame):
 		self.voiceList.Enable(False)
 		self.newVoiceBut.Enable(False)
 		self.delVoiceBut.Enable(False)
-
+		self.ResetUndo()
+	
 	def OnQuit(self, event = None):
 		self.OnClose()
 		self.Close(True)
@@ -535,6 +549,7 @@ class LipsyncFrame(wx.Frame):
 
 	def OnVoiceName(self, event):
 		if (self.doc is not None) and (self.doc.currentVoice is not None):
+			self.PushPrechangeDocOnUndoStack()
 			self.doc.dirty = True
 			self.doc.currentVoice.name = self.voiceName.GetValue()
 			self.voiceList.SetString(self.voiceList.GetSelection(), self.doc.currentVoice.name)
@@ -543,12 +558,14 @@ class LipsyncFrame(wx.Frame):
 		if self.ignoreTextChanges:
 			return
 		if (self.doc is not None) and (self.doc.currentVoice is not None):
+			self.PushPrechangeDocOnUndoStack()
 			self.doc.dirty = True
 			self.doc.currentVoice.text = self.voiceText.GetValue()
 
 	def OnVoiceBreakdown(self, event = None):
 		if (self.doc is not None) and (self.doc.currentVoice is not None):
 			language = self.languageChoice.GetStringSelection()
+			self.PushPrechangeDocOnUndoStack()
 			phonemeset_name = self.phonemesetChoice.GetStringSelection()
 			self.phonemeset.Load(phonemeset_name)
 			self.doc.dirty = True
@@ -598,6 +615,7 @@ class LipsyncFrame(wx.Frame):
 			newFps = self.doc.fps
 		if newFps == self.doc.fps:
 			return
+		self.PushPrechangeDocOnUndoStack()
 		self.doc.dirty = True
 		self.doc.fps = newFps
 		if self.doc.fps < 1:
@@ -605,7 +623,7 @@ class LipsyncFrame(wx.Frame):
 		if self.doc.fps > 120:
 			self.doc.fps = 120
 		# refresh the document properties
-		self.doc.OpenAudio(self.doc.soundPath)
+		self.doc.OpenAudio(self.doc.soundPath, self)
 		self.waveformView.SetDocument(None)
 		self.waveformView.SetDocument(self.doc)
 		self.mouthView.DrawMe()
@@ -624,6 +642,8 @@ class LipsyncFrame(wx.Frame):
 	def OnNewVoice(self, event):
 		if self.doc is None:
 			return
+		self.EnableVoiceEvents(False)
+		self.PushPrechangeDocOnUndoStack()
 		self.doc.dirty = True
 		self.doc.voices.append(LipsyncVoice("Voice %d" % (len(self.doc.voices) + 1)))
 		self.doc.currentVoice = self.doc.voices[-1]
@@ -635,10 +655,13 @@ class LipsyncFrame(wx.Frame):
 		self.ignoreTextChanges = False
 		self.waveformView.UpdateDrawing()
 		self.mouthView.DrawMe()
+		self.EnableVoiceEvents(True)
 
 	def OnDelVoice(self, event):
 		if (self.doc is None) or (len(self.doc.voices) == 1):
 			return
+		self.EnableVoiceEvents(False)
+		self.PushPrechangeDocOnUndoStack()
 		self.doc.dirty = True
 		newIndex = self.doc.voices.index(self.doc.currentVoice)
 		if newIndex > 0:
@@ -655,12 +678,92 @@ class LipsyncFrame(wx.Frame):
 		self.voiceText.SetValue(self.doc.currentVoice.text)
 		self.waveformView.UpdateDrawing()
 		self.mouthView.DrawMe()
+		self.EnableVoiceEvents(True)
 		
 	def OnReloadDictionary(self, event):
 		print "reload the dictionary"
-		lang_config = self.doc.language_manager.language_table[self.languageChoice.GetStringSelection()]
-		self.doc.language_manager.LoadLanguage(lang_config,force=True)
-		
+		lang_config = self.langman.language_table[self.languageChoice.GetStringSelection()]
+		self.langman.LoadLanguage(lang_config,force=True)
+	
+	# Undo / redo methods.
+	
+	# This "unsophisticated" undo implementation pushes a copy of the entire doc on the undo stack.
+	def PushPrechangeDocOnUndoStack(self, doc=None):
+		if (self.doc is None and doc is None):
+			return
+		# Use parameter doc if given, else make a copy of current doc.
+		if doc is None:
+			doc = LipsyncDoc(self.doc)
+		#
+		# Don't undo every single letter! Check if there is already a text change on the undo stack.
+		# If so, pop that intermediate change.
+		voiceIndex = self.doc.voices.index(self.doc.currentVoice)
+		if len(undoStack) >= 2 and voiceIndex < len(undoStack[-1].voices) and voiceIndex < len(undoStack[-2].voices):
+			voice0 = undoStack[-2].voices[voiceIndex];
+			voice1 = undoStack[-1].voices[voiceIndex];
+			voice2 = doc.currentVoice;
+			if voice0.text != voice1.text and voice1.text != voice2.text:
+				undoStack.pop()
+			elif voice0.name != voice1.name and voice1.name != voice2.name:
+				undoStack.pop()
+		#
+		# Push current doc on undo stack.
+		undoStack.append(doc)
+		# No redo after a new change: clear redo stack.
+		del redoStack[:]
+		# Enable / disable buttons.
+		self.EnableUndoRedo()
+
+	def OnUndo(self, event):
+		if (self.doc is None):
+			return
+		if len(undoStack) > 0:
+			redoStack.append(self.doc)
+			self.SetDocument(undoStack.pop())
+		self.EnableUndoRedo()
+	
+	def OnRedo(self, event):
+		if (self.doc is None):
+			return
+		if len(redoStack) > 0:
+			undoStack.append(self.doc)
+			self.SetDocument(redoStack.pop())
+		self.EnableUndoRedo()
+	
+	def SetDocument(self, doc):
+		# Disable events, so they don't trigger another call to the undo stack.
+		self.EnableVoiceEvents(False)
+		self.doc = doc
+		# Fill voice widgets.
+		self.voiceList.Clear()
+		for voice in doc.voices:
+			self.voiceList.Append(voice.name)
+		self.voiceList.SetSelection(doc.voices.index(doc.currentVoice))
+		self.voiceName.SetValue(doc.currentVoice.name)
+		self.voiceText.SetValue(doc.currentVoice.text)
+		# Update views.
+		self.mouthView.SetDocument(doc)
+		self.waveformView.SetDocument(doc)
+		# Re-enable events.
+		self.EnableVoiceEvents(True)
+	
+	def EnableVoiceEvents(self, enabled):
+		wx.EVT_BUTTON(self, ID_NEWVOICE, self.OnNewVoice if enabled else None)
+		wx.EVT_BUTTON(self, ID_DELVOICE, self.OnDelVoice if enabled else None)
+		wx.EVT_LISTBOX(self, ID_VOICELIST, self.OnSelVoice if enabled else None)
+		wx.EVT_TEXT(self, ID_VOICENAME, self.OnVoiceName if enabled else None)
+		wx.EVT_TEXT(self, ID_VOICETEXT, self.OnVoiceText if enabled else None)
+
+	def EnableUndoRedo(self):
+		self.mainFrame_menubar.Enable(wx.ID_UNDO, len(undoStack) > 0)
+		self.mainFrame_menubar.Enable(wx.ID_REDO, len(redoStack) > 0)
+		self.mainFrame_toolbar.EnableTool(wx.ID_UNDO, len(undoStack) > 0)
+		self.mainFrame_toolbar.EnableTool(wx.ID_REDO, len(redoStack) > 0)
+
+	def ResetUndo(self):
+		del undoStack[:]
+		del redoStack[:]
+		self.EnableUndoRedo()
 
 # end of class LipsyncFrame
 

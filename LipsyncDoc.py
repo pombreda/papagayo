@@ -27,6 +27,8 @@ import SoundPlayer
 import traceback
 import sys
 import breakdowns
+import copy
+import math
 
 strip_symbols = '.,!?;-/()"'
 strip_symbols += u'\N{INVERTED QUESTION MARK}'
@@ -34,20 +36,103 @@ strip_symbols += u'\N{INVERTED QUESTION MARK}'
 
 ###############################################################
 
-class LipsyncPhoneme:
-	def __init__(self):
+class LipsyncPhoneme(object):
+	def __init__(self, parent):
+		self.parent = parent
 		self.text = ""
-		self.frame = 0
+		self._frame = 0
+		self.percentage = 0;
+	
+	@property
+	def frame(self):
+		return self._frame
+	
+	@frame.setter
+	def frame(self, value):
+		self.percentage = (value - self.parent.startFrame) / float(self.parent.endFrame - self.parent.startFrame)
+		self._frame = value
+		
+	# May only be called if other phonemes are not affected by the previous change.
+	def RepositionAndConstrain(self):
+		self.Reposition()
+		self.Constrain()
+	
+	def Reposition(self):
+		parent = self.parent
+		# Set value by percentage.
+		self._frame = int(parent.startFrame + self.percentage * (parent.endFrame - parent.startFrame))
+
+	def Constrain(self):
+		parent = self.parent
+		# Constrain by predecessor and successor bounds.
+		index = parent.phonemes.index(self)
+		if index < len(parent.phonemes)-1:
+			self._frame = min(self._frame, parent.phonemes[index+1]._frame - 1)
+		if index > 0:
+			self._frame = max(self._frame, parent.phonemes[index-1]._frame + 1)
+		# Constrain by parent bounds.
+		self._frame = max(self._frame, parent.startFrame)
+		self._frame = min(self._frame, parent.endFrame)
 
 ###############################################################
 
-class LipsyncWord:
-	def __init__(self):
+class LipsyncWord(object):
+	def __init__(self, parent):
+		self.parent = parent
 		self.text = ""
-		self.startFrame = 0
-		self.endFrame = 0
+		self._startFrame = 0
+		self._endFrame = 0
+		self.startPercentage = 0;
+		self.endPercentage = 0;
 		self.phonemes = []
 
+	@property
+	def startFrame(self):
+		return self._startFrame
+		
+	@startFrame.setter
+	def startFrame(self, value):
+		self.startPercentage = (value - self.parent.startFrame) / float(self.parent.endFrame - self.parent.startFrame)
+		self._startFrame = value
+		
+	@property
+	def endFrame(self):
+		return self._endFrame
+		
+	@endFrame.setter
+	def endFrame(self, value):
+		self.endPercentage = (value - self.parent.startFrame) / float(self.parent.endFrame - self.parent.startFrame)
+		self._endFrame = value
+	
+	# May only be called if other words are not affected by the previous change.
+	def RepositionAndConstrain(self):
+		self.Reposition()
+		self.Constrain()
+	
+	def Reposition(self):
+		parent = self.parent;
+		# Set values by percentage.
+		self._startFrame = int(parent.startFrame + self.startPercentage * (parent.endFrame - parent.startFrame))
+		self._endFrame = int(parent.startFrame + self.endPercentage * (parent.endFrame - parent.startFrame))
+		# Reposition phonemes.
+		for phoneme in self.phonemes:
+			phoneme.Reposition()
+		
+	def Constrain(self):
+		parent = self.parent
+		# Constrain by predecessor and successor bounds.
+		index = parent.words.index(self)
+		if index < len(parent.words)-1:
+			self._endFrame = min(self._endFrame, parent.words[index+1]._startFrame - 1)
+		if index > 0:
+			self._startFrame = max(self._startFrame, parent.words[index-1]._endFrame + 1)
+		# Constrain by parent bounds.
+		self._startFrame = max(self._startFrame, parent.startFrame)
+		self._endFrame = min(self._endFrame, parent.endFrame)
+		# Constrain phonemes.
+		for phoneme in self.phonemes:
+			phoneme.Constrain()
+	
 	def RunBreakdown(self, parentWindow, language, languagemanager, phonemeset):
 		self.phonemes = []
 		try:
@@ -79,7 +164,7 @@ class LipsyncWord:
 			for p in pronunciation:
 				if len(p) == 0:
 					continue
-				phoneme = LipsyncPhoneme()
+				phoneme = LipsyncPhoneme(self)
 				phoneme.text = p
 				self.phonemes.append(phoneme)
 		except:
@@ -91,24 +176,10 @@ class LipsyncWord:
 				for p in dlg.phonemeCtrl.GetValue().split():
 					if len(p) == 0:
 						continue
-					phoneme = LipsyncPhoneme()
+					phoneme = LipsyncPhoneme(self)
 					phoneme.text = p
 					self.phonemes.append(phoneme)
 			dlg.Destroy()
-
-	def RepositionPhoneme(self, phoneme):
-		id = 0
-		for i in range(len(self.phonemes)):
-			if phoneme is self.phonemes[i]:
-				id = i
-		if (id > 0) and (phoneme.frame < self.phonemes[id - 1].frame + 1):
-			phoneme.frame = self.phonemes[id - 1].frame + 1
-		if (id < len(self.phonemes) - 1) and (phoneme.frame > self.phonemes[id + 1].frame - 1):
-			phoneme.frame = self.phonemes[id + 1].frame - 1
-		if phoneme.frame < self.startFrame:
-			phoneme.frame = self.startFrame
-		if phoneme.frame > self.endFrame:
-			phoneme.frame = self.endFrame
 
 ###############################################################
 
@@ -124,47 +195,11 @@ class LipsyncPhrase:
 		for w in self.text.split():
 			if len(w) == 0:
 				continue
-			word = LipsyncWord()
+			word = LipsyncWord(self)
 			word.text = w
 			self.words.append(word)
 		for word in self.words:
 			word.RunBreakdown(parentWindow, language, languagemanager, phonemeset)
-
-	def RepositionWord(self, word):
-		id = 0
-		for i in range(len(self.words)):
-			if word is self.words[i]:
-				id = i
-		if (id > 0) and (word.startFrame < self.words[id - 1].endFrame + 1):
-			word.startFrame = self.words[id - 1].endFrame + 1
-			if word.endFrame < word.startFrame + 1:
-				word.endFrame = word.startFrame + 1
-		if (id < len(self.words) - 1) and (word.endFrame > self.words[id + 1].startFrame - 1):
-			word.endFrame = self.words[id + 1].startFrame - 1
-			if word.startFrame > word.endFrame - 1:
-				word.startFrame = word.endFrame - 1
-		if word.startFrame < self.startFrame:
-			word.startFrame = self.startFrame
-		if word.endFrame > self.endFrame:
-			word.endFrame = self.endFrame
-		if word.endFrame < word.startFrame:
-			word.endFrame = word.startFrame
-		frameDuration = word.endFrame - word.startFrame + 1
-		phonemeCount = len(word.phonemes)
-		# now divide up the total time by phonemes
-		if frameDuration > 0 and phonemeCount > 0:
-			framesPerPhoneme = float(frameDuration) / float(phonemeCount)
-			if framesPerPhoneme < 1:
-				framesPerPhoneme = 1
-		else:
-			framesPerPhoneme = 1
-		# finally, assign frames based on phoneme durations
-		curFrame = word.startFrame
-		for phoneme in word.phonemes:
-			phoneme.frame = int(round(curFrame))
-			curFrame = curFrame + framesPerPhoneme
-		for phoneme in word.phonemes:
-			word.RepositionPhoneme(phoneme)
 
 ###############################################################
 
@@ -246,35 +281,12 @@ class LipsyncVoice:
 			phrase.endFrame = lastFrame
 		if phrase.startFrame > phrase.endFrame - 1:
 			phrase.startFrame = phrase.endFrame - 1
-		# for first-guess frame alignment, count how many phonemes we have
-		frameDuration = phrase.endFrame - phrase.startFrame + 1
-		phonemeCount = 0
+		# First reposition all words.
 		for word in phrase.words:
-			if len(word.phonemes) == 0: # deal with unknown words
-				phonemeCount = phonemeCount + 4
-			for phoneme in word.phonemes:
-				phonemeCount = phonemeCount + 1
-		# now divide up the total time by phonemes
-		if frameDuration > 0 and phonemeCount > 0:
-			framesPerPhoneme = float(frameDuration) / float(phonemeCount)
-			if framesPerPhoneme < 1:
-				framesPerPhoneme = 1
-		else:
-			framesPerPhoneme = 1
-		# finally, assign frames based on phoneme durations
-		curFrame = phrase.startFrame
+			word.Reposition()
+		# Then constrain to sibling bounds.
 		for word in phrase.words:
-			for phoneme in word.phonemes:
-				phoneme.frame = int(round(curFrame))
-				curFrame = curFrame + framesPerPhoneme
-			if len(word.phonemes) == 0: # deal with unknown words
-				word.startFrame = curFrame
-				word.endFrame = curFrame + 3
-				curFrame = curFrame + 4
-			else:
-				word.startFrame = word.phonemes[0].frame
-				word.endFrame = word.phonemes[-1].frame + int(round(framesPerPhoneme)) - 1
-			phrase.RepositionWord(word)
+			word.Constrain()
 
 	def Open(self, inFile):
 		self.name = inFile.readline().strip()
@@ -288,14 +300,14 @@ class LipsyncVoice:
 			phrase.endFrame = int(inFile.readline())
 			numWords = int(inFile.readline())
 			for w in range(numWords):
-				word = LipsyncWord()
+				word = LipsyncWord(phrase)
 				wordLine = inFile.readline().split()
 				word.text = wordLine[0]
 				word.startFrame = int(wordLine[1])
 				word.endFrame = int(wordLine[2])
 				numPhonemes = int(wordLine[3])
 				for p in range(numPhonemes):
-					phoneme = LipsyncPhoneme()
+					phoneme = LipsyncPhoneme(word)
 					phonemeLine = inFile.readline().split()
 					phoneme.frame = int(phonemeLine[0])
 					phoneme.text = phonemeLine[1]
@@ -393,25 +405,24 @@ class LipsyncVoice:
 ###############################################################
 
 class LipsyncDoc:
-	def __init__(self,langman,parent):
-		self.dirty = False
-		self.name = "Untitled"
-		self.path = None
-		self.fps = 24
-		self.soundDuration = 72
-		self.soundPath = ""
-		self.sound = None
-		self.voices = []
-		self.currentVoice = None
-		self.language_manager = langman
-		self.parent = parent
-
+	def __init__(self, doc = None):
+		# Copy / deepcopy fields from source doc if given:
+		self.dirty = doc.dirty if doc else False
+		self.name = doc.name if doc else "Untitled"
+		self.path = doc.path if doc else None
+		self.fps = doc.fps if doc else 24
+		self.soundDuration = doc.soundDuration if doc else 72
+		self.soundPath = doc.soundPath if doc else ""
+		self.sound = doc.sound if doc else None
+		self.voices = copy.deepcopy(doc.voices) if doc else []
+		self.currentVoice = self.voices[doc.voices.index(doc.currentVoice)] if doc else None
+	
 	def __del__(self):
 		# Properly close down the sound object
 		if self.sound is not None:
 			del self.sound
 
-	def Open(self, path):
+	def Open(self, path, frame):
 		self.dirty = False
 		self.path = os.path.normpath(path)
 		self.name = os.path.basename(path)
@@ -424,26 +435,26 @@ class LipsyncDoc:
 		if not os.path.isabs(self.soundPath):
 			self.soundPath = os.path.normpath(os.path.dirname(self.path) + '/' + self.soundPath)
 		self.fps = int(inFile.readline())
-		print "self.path: %s" % self.path
+		#print "self.path: %s" % self.path
 		self.soundDuration = int(inFile.readline())
-		print "self.soundDuration: %d" % self.soundDuration
+		#print "self.soundDuration: %d" % self.soundDuration
 		numVoices = int(inFile.readline())
 		for i in range(numVoices):
 			voice = LipsyncVoice()
 			voice.Open(inFile)
 			self.voices.append(voice)
 		inFile.close()
-		self.OpenAudio(self.soundPath)
+		self.OpenAudio(self.soundPath, frame)
 		if len(self.voices) > 0:
 			self.currentVoice = self.voices[0]
 
-	def OpenAudio(self, path):
+	def OpenAudio(self, path, frame):
 		if self.sound is not None:
 			del self.sound
 			self.sound = None
 		#self.soundPath = path.encode("utf-8")
 		self.soundPath = path.encode('latin-1', 'replace')
-		self.sound = SoundPlayer.SoundPlayer(self.soundPath, self.parent)
+		self.sound = SoundPlayer.SoundPlayer(self.soundPath, frame)
 		if self.sound.IsValid():
 			print "valid sound"
 			self.soundDuration = int(self.sound.Duration() * self.fps)

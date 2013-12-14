@@ -37,7 +37,7 @@ defaultSampleWidth = 4
 defaultSamplesPerFrame = 2
 
 class WaveformView(wx.ScrolledWindow):
-	def __init__(self, *args, **kwds):
+	def __init__(self, frame, *args, **kwds):
 		# begin wxGlade: WaveformView.__init__
 		kwds["style"] = wx.SUNKEN_BORDER|wx.TAB_TRAVERSAL
 		wx.ScrolledWindow.__init__(self, *args, **kwds)
@@ -45,6 +45,9 @@ class WaveformView(wx.ScrolledWindow):
 		self.__set_properties()
 		self.__do_layout()
 		# end wxGlade
+		
+		# For pushing changes on undo stack.
+		self.frame = frame
 
 		# Other initialization
 		self.doc = None
@@ -125,6 +128,8 @@ class WaveformView(wx.ScrolledWindow):
 	def OnMouseDown(self, event):
 		self.isDragging = False
 		self.dragChange = False
+		if self.doc:
+			self.preDragDoc = LipsyncDoc(self.doc)
 		self.draggingEnd = -1 # which end of the object (beginning or end) are you dragging
 		self.selectedPhrase = None
 		self.selectedWord = None
@@ -134,7 +139,7 @@ class WaveformView(wx.ScrolledWindow):
 		self.scrubFrame = x / self.frameWidth
 		self.lastFrame = self.scrubFrame
 		self.dragStartFrame = self.scrubFrame
-		if (self.doc is not None) and (self.doc.sound is not None) and (not self.doc.sound.IsPlaying()):
+		if (self.doc is not None) and (self.doc.sound is None or not self.doc.sound.IsPlaying()):
 			self.isDragging = True
 			if self.doc.currentVoice is not None:
 				# test to see if the user clicked on a phrase, word, or phoneme
@@ -191,7 +196,8 @@ class WaveformView(wx.ScrolledWindow):
 			if (self.selectedPhrase is None) and (self.selectedWord is None) and (self.selectedPhoneme is None):
 				self.basicScrubbing = True
 				self.oldFrame = 0
-				self.doc.sound.PlaySegment(float(self.scrubFrame) / float(self.doc.fps), 15.0 / self.doc.fps, 1.0)
+				if self.doc.sound is not None:
+					self.doc.sound.PlaySegment(float(self.scrubFrame) / float(self.doc.fps), 15.0 / self.doc.fps, 1.0)
 				self.mouthView.SetFrame(self.scrubFrame)
 				self.UpdateDrawing(False)
 			elif event.RightDown() and self.selectedWord:
@@ -212,7 +218,7 @@ class WaveformView(wx.ScrolledWindow):
 						phoneme = LipsyncPhoneme()
 						phoneme.text = p
 						self.selectedWord.phonemes.append(phoneme)
-					self.parentPhrase.RepositionWord(self.selectedWord)
+					self.selectedWord.RepositionAndConstrain()
 					self.UpdateDrawing()
 				dlg.Destroy()
 				self.isDragging = False
@@ -220,7 +226,16 @@ class WaveformView(wx.ScrolledWindow):
 				self.selectedPhrase = None
 				self.selectedWord = None
 				self.selectedPhoneme = None
-			elif event.LeftDClick():
+			elif event.RightDown() and self.selectedPhoneme:
+				# Show dialog to delete single phoneme.
+				dlg = wx.MessageDialog(self, 'Delete phoneme "%s"?' % self.selectedPhoneme.text,
+						'Confirm Delete', wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+				if dlg.ShowModal() == wx.ID_YES:
+					self.frame.PushPrechangeDocOnUndoStack()
+					self.selectedPhoneme.parent.phonemes.remove(self.selectedPhoneme)
+					self.UpdateDrawing()
+				dlg.Destroy()
+			elif event.LeftDClick() and self.doc.sound is not None:
 				playSegment = False
 				if self.selectedPhrase is not None:
 					playSegment = True
@@ -263,6 +278,10 @@ class WaveformView(wx.ScrolledWindow):
 
 	def OnMouseUp(self, event):
 		if self.isDragging:
+			if (self.dragChange == True) and (self.preDragDoc is not None):
+				self.frame.PushPrechangeDocOnUndoStack(self.preDragDoc)
+			self.dragChange = False
+			self.preDragDoc = None
 			self.ReleaseMouse()
 			self.isDragging = False
 			self.scrubFrame = -1
@@ -316,7 +335,7 @@ class WaveformView(wx.ScrolledWindow):
 						self.selectedWord.startFrame = frame
 						if self.selectedWord.startFrame > self.selectedWord.endFrame - 1:
 							self.selectedWord.startFrame = self.selectedWord.endFrame - 1
-						self.parentPhrase.RepositionWord(self.selectedWord)
+						self.selectedWord.RepositionAndConstrain()
 				elif self.draggingEnd == 1:
 					if frame != self.selectedWord.endFrame:
 						self.dragChange = True
@@ -324,21 +343,22 @@ class WaveformView(wx.ScrolledWindow):
 						self.selectedWord.endFrame = frame
 						if self.selectedWord.endFrame < self.selectedWord.startFrame + 1:
 							self.selectedWord.endFrame = self.selectedWord.startFrame + 1
-						self.parentPhrase.RepositionWord(self.selectedWord)
+						self.selectedWord.RepositionAndConstrain()
 				elif self.draggingEnd == 2:
 					if frame != self.lastFrame:
 						self.dragChange = True
 						self.doc.dirty = True
 						self.selectedWord.startFrame += frame - self.lastFrame
 						self.selectedWord.endFrame += frame - self.lastFrame
-						self.parentPhrase.RepositionWord(self.selectedWord)
+						self.selectedWord.RepositionAndConstrain()
+						self.selectedWord.Constrain()
 			elif self.selectedPhoneme is not None:
 				if self.draggingEnd == 0:
 					if frame != self.selectedPhoneme.frame:
 						self.dragChange = True
 						self.doc.dirty = True
 						self.selectedPhoneme.frame = frame
-						self.parentWord.RepositionPhoneme(self.selectedPhoneme)
+						self.selectedPhoneme.RepositionAndConstrain()
 
 			if (frame != self.scrubFrame) and (self.doc is not None) and (self.doc.sound is not None): # and (not self.doc.sound.IsPlaying()):
 				self.oldFrame = self.scrubFrame
@@ -445,20 +465,20 @@ class WaveformView(wx.ScrolledWindow):
 			dc.Clear()
 			dc.EndDrawing()
 			return
-		fillColor = wx.Color(162, 205, 242)
-		lineColor = wx.Color(30, 121, 198)
-		frameCol = wx.Color(192, 192, 192)
-		frameTextCol = wx.Color(64, 64, 64)
-		playBackCol = wx.Color(255, 127, 127)
-		playForeCol = wx.Color(209, 102, 121)
-		playOutlineCol = wx.Color(128, 0, 0)
-		textCol = wx.Color(64, 64, 64)
-		phraseFillCol = wx.Color(205, 242, 162)
-		phraseOutlineCol = wx.Color(121, 198, 30)
-		wordFillCol = wx.Color(242, 205, 162)
-		wordOutlineCol = wx.Color(198, 121, 30)
-		phonemeFillCol = wx.Color(231, 185, 210)
-		phonemeOutlineCol = wx.Color(173, 114, 146)
+		fillColor = wx.Colour(162, 205, 242)
+		lineColor = wx.Colour(30, 121, 198)
+		frameCol = wx.Colour(192, 192, 192)
+		frameTextCol = wx.Colour(64, 64, 64)
+		playBackCol = wx.Colour(255, 127, 127)
+		playForeCol = wx.Colour(209, 102, 121)
+		playOutlineCol = wx.Colour(128, 0, 0)
+		textCol = wx.Colour(64, 64, 64)
+		phraseFillCol = wx.Colour(205, 242, 162)
+		phraseOutlineCol = wx.Colour(121, 198, 30)
+		wordFillCol = wx.Colour(242, 205, 162)
+		wordOutlineCol = wx.Colour(198, 121, 30)
+		phonemeFillCol = wx.Colour(231, 185, 210)
+		phonemeOutlineCol = wx.Colour(173, 114, 146)
 		font = wx.Font(8, wx.SWISS, wx.NORMAL, wx.NORMAL)
 		drawPlayMarker = False
 		curFrame = self.curFrame

@@ -2,15 +2,24 @@ import wave
 import audioop
 import sys
 import traceback
-import pyaudio
 import thread
+try:
+    import pyaudio
+    pyaudio_available = True
+except ImportError:
+    pyaudio_available = False
 
 class SoundPlayer():
     def __init__(self, soundfile, parent):
         self.soundfile = soundfile
         self.isplaying = False
         self.time = 0 # current audio position in frames
-        self.audio = pyaudio.PyAudio()
+        
+        if pyaudio_available:
+            self.audio = pyaudio.PyAudio()
+        else:
+            self.isvalid = False
+            return
         
         try:
             self.wave_reference = wave.open(self.soundfile)
