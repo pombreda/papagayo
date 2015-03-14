@@ -1,0 +1,3 @@
+Lost Marble has picked up development on this project again. They've done a complete rewrite using C++/QT5. http://www.lostmarble.com/papagayo/index.shtml Source is available from GitHub https://github.com/LostMoho/Papagayo
+
+Papagayo is a lip-syncing program designed to help you line up phonemes (mouth shapes) with the actual recorded sound of actors speaking. Papagayo makes it easy to lip sync animated characters by making the process very simple - just type in the words being spoken (or copy/paste them from the animation's script), then drag the words on top of the sound's waveform until they line up with the proper sounds.
